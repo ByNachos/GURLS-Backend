@@ -1,0 +1,7 @@
+env: "production"
+
+grpc_server:
+  port: 50051
+
+url_shortener:
+  alias_length: 6

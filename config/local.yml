@@ -1,0 +1,7 @@
+env: "local" # 'local', 'dev', 'prod'
+
+grpc_server:
+  port: 50051
+
+url_shortener:
+  alias_length: 4
