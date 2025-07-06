@@ -4,6 +4,7 @@ import (
 	"GURLS-Backend/internal/domain"
 	"context"
 	"errors"
+	"time"
 )
 
 var (
@@ -23,4 +24,8 @@ type Storage interface {
 	AliasExists(ctx context.Context, alias string) (bool, error)
 	RecordClick(ctx context.Context, alias string, deviceType string) error
 	ListUserLinks(ctx context.Context, userID int64) ([]*domain.Link, error)
+
+	// Extended analytics methods
+	RecordClickAdvanced(ctx context.Context, alias string, deviceType string, ipAddress *string, userAgent *string, referer *string, clickedAt *time.Time) error
+	GetClicksByDevice(ctx context.Context, linkID int64) (map[string]int64, error)
 }

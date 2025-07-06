@@ -5,3 +5,18 @@ grpc_server:
 
 url_shortener:
   alias_length: 6
+
+database:
+  host: "${DATABASE_HOST}"
+  port: "${DATABASE_PORT}"
+  user: "${DATABASE_USER}"
+  password: "${DATABASE_PASSWORD}"
+  dbname: "gurls"
+  sslmode: "require"
+  timezone: "UTC"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: "1h"
+  # Migration settings for production
+  auto_migrate: false  # Do not run migrations automatically in production
+  seed_data: false     # Do not seed data in production

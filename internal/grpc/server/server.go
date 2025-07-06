@@ -2,11 +2,13 @@ package server
 
 import (
 	shortenerv1 "GURLS-Backend/gen/go/shortener/v1"
+	"GURLS-Backend/internal/analytics"
 	"GURLS-Backend/internal/domain"
 	"GURLS-Backend/internal/repository"
 	"GURLS-Backend/internal/service"
 	"context"
 	"errors"
+	"time"
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -18,13 +20,19 @@ import (
 
 type Server struct {
 	shortenerv1.UnimplementedShortenerServer
-	log          *zap.Logger
-	urlShortener *service.URLShortenerService
-	storage      repository.Storage
+	log                *zap.Logger
+	urlShortener       *service.URLShortenerService
+	storage            repository.Storage
+	analyticsProcessor *analytics.Processor
 }
 
-func Register(gRPCServer *grpc.Server, log *zap.Logger, urlShortener *service.URLShortenerService, storage repository.Storage) {
-	shortenerv1.RegisterShortenerServer(gRPCServer, &Server{log: log, urlShortener: urlShortener, storage: storage})
+func Register(gRPCServer *grpc.Server, log *zap.Logger, urlShortener *service.URLShortenerService, storage repository.Storage, analyticsProcessor *analytics.Processor) {
+	shortenerv1.RegisterShortenerServer(gRPCServer, &Server{
+		log:                log,
+		urlShortener:       urlShortener,
+		storage:            storage,
+		analyticsProcessor: analyticsProcessor,
+	})
 }
 
 func (s *Server) CreateLink(ctx context.Context, req *shortenerv1.CreateLinkRequest) (*shortenerv1.CreateLinkResponse, error) {
@@ -44,7 +52,7 @@ func (s *Server) CreateLink(ctx context.Context, req *shortenerv1.CreateLinkRequ
 
 	link := &domain.Link{UserID: user.ID, OriginalURL: req.GetOriginalUrl()}
 	if req.Title != nil {
-		link.Title = *req.Title
+		link.Title = req.Title
 	}
 	if req.ExpiresAt != nil {
 		expiresAt := req.GetExpiresAt().AsTime()
@@ -84,8 +92,8 @@ func (s *Server) ListUserLinks(ctx context.Context, req *shortenerv1.ListUserLin
 	res := &shortenerv1.ListUserLinksResponse{Links: make([]*shortenerv1.LinkInfo, 0, len(links))}
 	for _, link := range links {
 		linkInfo := &shortenerv1.LinkInfo{Alias: link.Alias, OriginalUrl: link.OriginalURL}
-		if link.Title != "" {
-			linkInfo.Title = &link.Title
+		if link.Title != nil && *link.Title != "" {
+			linkInfo.Title = link.Title
 		}
 		res.Links = append(res.Links, linkInfo)
 	}
@@ -123,14 +131,21 @@ func (s *Server) GetLinkStats(ctx context.Context, req *shortenerv1.GetLinkStats
 		return nil, status.Error(codes.Internal, "could not retrieve link stats")
 	}
 
+	// Get clicks by device from database
+	clicksByDevice, err := s.storage.GetClicksByDevice(ctx, link.ID)
+	if err != nil {
+		log.Warn("failed to get clicks by device, using empty map", zap.Error(err))
+		clicksByDevice = make(map[string]int64)
+	}
+
 	response := &shortenerv1.GetLinkStatsResponse{
 		OriginalUrl:    link.OriginalURL,
 		ClickCount:     link.ClickCount,
-		ClicksByDevice: link.ClicksByDevice,
+		ClicksByDevice: clicksByDevice,
 	}
 
-	if link.Title != "" {
-		response.Title = &link.Title
+	if link.Title != nil && *link.Title != "" {
+		response.Title = link.Title
 	}
 	if link.ExpiresAt != nil {
 		response.ExpiresAt = timestamppb.New(*link.ExpiresAt)
@@ -148,7 +163,24 @@ func (s *Server) RecordClick(ctx context.Context, req *shortenerv1.RecordClickRe
 		return nil, status.Error(codes.InvalidArgument, "device_type is required")
 	}
 
-	if err := s.storage.RecordClick(ctx, req.GetAlias(), req.GetDeviceType()); err != nil {
+	// Use advanced recording if additional fields are provided
+	var clickedAt *time.Time
+	if req.ClickedAt != nil {
+		t := req.GetClickedAt().AsTime()
+		clickedAt = &t
+	}
+
+	err := s.storage.RecordClickAdvanced(
+		ctx,
+		req.GetAlias(),
+		req.GetDeviceType(),
+		req.IpAddress,
+		req.UserAgent,
+		req.Referer,
+		clickedAt,
+	)
+
+	if err != nil {
 		if errors.Is(err, repository.ErrAliasNotFound) {
 			return nil, status.Error(codes.NotFound, "link not found")
 		}
@@ -158,4 +190,115 @@ func (s *Server) RecordClick(ctx context.Context, req *shortenerv1.RecordClickRe
 
 	log.Info("click recorded successfully", zap.String("device_type", req.GetDeviceType()))
 	return &emptypb.Empty{}, nil
+}
+
+func (s *Server) RedirectAndRecord(ctx context.Context, req *shortenerv1.RedirectAndRecordRequest) (*shortenerv1.RedirectAndRecordResponse, error) {
+	log := s.log.With(zap.String("rpc", "RedirectAndRecord"), zap.String("alias", req.GetAlias()))
+	if req.GetAlias() == "" {
+		return nil, status.Error(codes.InvalidArgument, "alias is required")
+	}
+
+	// Get link first
+	link, err := s.storage.GetLink(ctx, req.GetAlias())
+	if err != nil {
+		if errors.Is(err, repository.ErrAliasNotFound) {
+			return nil, status.Error(codes.NotFound, "link not found")
+		}
+		log.Error("failed to get link from storage", zap.Error(err))
+		return nil, status.Error(codes.Internal, "could not retrieve link")
+	}
+
+	// Prepare response
+	response := &shortenerv1.RedirectAndRecordResponse{
+		OriginalUrl: link.OriginalURL,
+	}
+	if link.Title != nil && *link.Title != "" {
+		response.Title = link.Title
+	}
+	if link.ExpiresAt != nil {
+		response.ExpiresAt = timestamppb.New(*link.ExpiresAt)
+	}
+
+	// Submit click data to reliable analytics processor
+	var clickedAt *time.Time
+	if req.ClickedAt != nil {
+		t := req.GetClickedAt().AsTime()
+		clickedAt = &t
+	}
+
+	clickData := &analytics.ClickData{
+		Alias:     req.GetAlias(),
+		IPAddress: req.IpAddress,
+		UserAgent: req.UserAgent,
+		Referer:   req.Referer,
+		ClickedAt: clickedAt,
+	}
+
+	// Submit to analytics processor (non-blocking with retry and error handling)
+	if err := s.analyticsProcessor.SubmitClick(clickData); err != nil {
+		// Log the submission error, but don't fail the redirect
+		log.Error("failed to submit click for analytics processing", 
+			zap.String("alias", req.GetAlias()),
+			zap.Error(err),
+		)
+		
+		// Fallback: try to record immediately (synchronous fallback)
+		// This ensures analytics are recorded even if the processor is unavailable
+		log.Info("attempting synchronous analytics fallback")
+		fallbackErr := s.storage.RecordClickAdvanced(
+			ctx, // Use request context for immediate operation
+			req.GetAlias(),
+			"unknown", // Device type will be "unknown" in fallback
+			req.IpAddress,
+			req.UserAgent,
+			req.Referer,
+			clickedAt,
+		)
+		if fallbackErr != nil {
+			log.Error("synchronous analytics fallback also failed", zap.Error(fallbackErr))
+		} else {
+			log.Info("synchronous analytics fallback succeeded")
+		}
+	}
+
+	log.Info("redirect processed successfully")
+	return response, nil
+}
+
+// Helper function for simple string contains check (fallback only)
+func contains(s, substr string) bool {
+	if s == "" || substr == "" {
+		return false
+	}
+	// Simple case-insensitive contains check for fallback
+	sLower := ""
+	substrLower := ""
+	
+	// Convert to lowercase manually
+	for _, r := range s {
+		if r >= 'A' && r <= 'Z' {
+			sLower += string(r + ('a' - 'A'))
+		} else {
+			sLower += string(r)
+		}
+	}
+	
+	for _, r := range substr {
+		if r >= 'A' && r <= 'Z' {
+			substrLower += string(r + ('a' - 'A'))
+		} else {
+			substrLower += string(r)
+		}
+	}
+	
+	return len(sLower) >= len(substrLower) && containsSubstring(sLower, substrLower)
+}
+
+func containsSubstring(str, substr string) bool {
+	for i := 0; i <= len(str)-len(substr); i++ {
+		if str[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
