@@ -23,10 +23,10 @@ type Server struct {
 	log                *zap.Logger
 	urlShortener       *service.URLShortenerService
 	storage            repository.Storage
-	analyticsProcessor *analytics.Processor
+	analyticsProcessor analytics.ProcessorInterface
 }
 
-func Register(gRPCServer *grpc.Server, log *zap.Logger, urlShortener *service.URLShortenerService, storage repository.Storage, analyticsProcessor *analytics.Processor) {
+func Register(gRPCServer *grpc.Server, log *zap.Logger, urlShortener *service.URLShortenerService, storage repository.Storage, analyticsProcessor analytics.ProcessorInterface) {
 	shortenerv1.RegisterShortenerServer(gRPCServer, &Server{
 		log:                log,
 		urlShortener:       urlShortener,

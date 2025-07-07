@@ -11,6 +11,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// ProcessorInterface defines the interface for analytics processors
+type ProcessorInterface interface {
+	Start() error
+	Stop() error
+	SubmitClick(clickData *ClickData) error
+	GetStats() map[string]interface{}
+}
+
 // ClickData represents analytics data to be processed
 type ClickData struct {
 	Alias     string

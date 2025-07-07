@@ -42,6 +42,9 @@ func (m *MockAnalyticsProcessor) Stop() error {
 
 func (m *MockAnalyticsProcessor) GetStats() map[string]interface{} {
     args := m.Called()
+    if args.Get(0) == nil {
+        return nil
+    }
     return args.Get(0).(map[string]interface{})
 }
 
@@ -115,14 +118,14 @@ func setupTestServer() (*Server, *MockStorage, *MockAnalyticsProcessor) {
         log:                log,
         urlShortener:       urlShortener,
         storage:            mockStorage,
-        analyticsProcessor: mockAnalytics, // Добавить mock
+        analyticsProcessor: mockAnalytics,
     }
 
     return server, mockStorage, mockAnalytics
 }
 
 func TestServer_GetLinkStats(t *testing.T) {
-	server, mockStorage := setupTestServer()
+	server, mockStorage, _ := setupTestServer()
 	ctx := context.Background()
 
 	// Test successful link retrieval
@@ -189,7 +192,7 @@ func TestServer_GetLinkStats(t *testing.T) {
 }
 
 func TestServer_RecordClick(t *testing.T) {
-	server, mockStorage := setupTestServer()
+	server, mockStorage, _ := setupTestServer()
 	ctx := context.Background()
 
 	// Test successful click recording
@@ -285,7 +288,7 @@ func TestServer_RecordClick(t *testing.T) {
 }
 
 func TestServer_RedirectAndRecord(t *testing.T) {
-	server, mockStorage := setupTestServer()
+	server, mockStorage, mockAnalytics := setupTestServer()
 	ctx := context.Background()
 
 	// Test successful redirect and record
@@ -301,7 +304,7 @@ func TestServer_RedirectAndRecord(t *testing.T) {
 		}
 
 		mockStorage.On("GetLink", ctx, "test123").Return(link, nil)
-		mockStorage.On("RecordClickAdvanced", mock.Anything, "test123", "unknown", (*string)(nil), (*string)(nil), (*string)(nil), (*time.Time)(nil)).Return(nil)
+		mockAnalytics.On("SubmitClick", mock.AnythingOfType("*analytics.ClickData")).Return(nil)
 
 		req := &shortenerv1.RedirectAndRecordRequest{Alias: "test123"}
 		resp, err := server.RedirectAndRecord(ctx, req)
@@ -314,6 +317,7 @@ func TestServer_RedirectAndRecord(t *testing.T) {
 		// Wait a bit for async operation to complete
 		time.Sleep(10 * time.Millisecond)
 		mockStorage.AssertExpectations(t)
+		mockAnalytics.AssertExpectations(t)
 	})
 
 	// Test with user agent detection
@@ -327,7 +331,7 @@ func TestServer_RedirectAndRecord(t *testing.T) {
 		userAgent := "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X)"
 
 		mockStorage.On("GetLink", ctx, "test123").Return(link, nil)
-		mockStorage.On("RecordClickAdvanced", mock.Anything, "test123", "mobile", (*string)(nil), &userAgent, (*string)(nil), (*time.Time)(nil)).Return(nil)
+		mockAnalytics.On("SubmitClick", mock.AnythingOfType("*analytics.ClickData")).Return(nil)
 
 		req := &shortenerv1.RedirectAndRecordRequest{
 			Alias:     "test123",
@@ -341,6 +345,7 @@ func TestServer_RedirectAndRecord(t *testing.T) {
 		// Wait a bit for async operation to complete
 		time.Sleep(10 * time.Millisecond)
 		mockStorage.AssertExpectations(t)
+		mockAnalytics.AssertExpectations(t)
 	})
 
 	// Test link not found
@@ -374,7 +379,7 @@ func TestServer_RedirectAndRecord(t *testing.T) {
 }
 
 func TestServer_DeleteLink(t *testing.T) {
-	server, mockStorage := setupTestServer()
+	server, mockStorage, _ := setupTestServer()
 	ctx := context.Background()
 
 	// Test successful deletion
