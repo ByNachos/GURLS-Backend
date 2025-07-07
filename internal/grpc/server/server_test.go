@@ -4,6 +4,7 @@ import (
 	shortenerv1 "GURLS-Backend/gen/go/shortener/v1"
 	"GURLS-Backend/internal/config"
 	"GURLS-Backend/internal/domain"
+	"GURLS-Backend/internal/analytics"
 	"GURLS-Backend/internal/repository"
 	"GURLS-Backend/internal/service"
 	"context"
@@ -18,6 +19,31 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+// MockAnalyticsProcessor is a mock implementation of analytics.Processor
+type MockAnalyticsProcessor struct {
+    mock.Mock
+}
+
+func (m *MockAnalyticsProcessor) SubmitClick(clickData *analytics.ClickData) error {
+    args := m.Called(clickData)
+    return args.Error(0)
+}
+
+func (m *MockAnalyticsProcessor) Start() error {
+    args := m.Called()
+    return args.Error(0)
+}
+
+func (m *MockAnalyticsProcessor) Stop() error {
+    args := m.Called()
+    return args.Error(0)
+}
+
+func (m *MockAnalyticsProcessor) GetStats() map[string]interface{} {
+    args := m.Called()
+    return args.Get(0).(map[string]interface{})
+}
 
 // MockStorage is a mock implementation of repository.Storage
 type MockStorage struct {
@@ -77,21 +103,22 @@ func (m *MockStorage) GetClicksByDevice(ctx context.Context, linkID int64) (map[
 	return args.Get(0).(map[string]int64), args.Error(1)
 }
 
-func setupTestServer() (*Server, *MockStorage) {
-	mockStorage := &MockStorage{}
-	log := zap.NewNop()
-	
-	// Create a basic URL shortener service
-	cfg := &config.URLShortener{AliasLength: 6}
-	urlShortener := service.NewURLShortener(mockStorage, cfg)
-	
-	server := &Server{
-		log:          log,
-		urlShortener: urlShortener,
-		storage:      mockStorage,
-	}
-	
-	return server, mockStorage
+func setupTestServer() (*Server, *MockStorage, *MockAnalyticsProcessor) {
+    mockStorage := &MockStorage{}
+    mockAnalytics := &MockAnalyticsProcessor{}
+    log := zap.NewNop()
+
+    cfg := &config.URLShortener{AliasLength: 6}
+    urlShortener := service.NewURLShortener(mockStorage, cfg)
+
+    server := &Server{
+        log:                log,
+        urlShortener:       urlShortener,
+        storage:            mockStorage,
+        analyticsProcessor: mockAnalytics, // Добавить mock
+    }
+
+    return server, mockStorage, mockAnalytics
 }
 
 func TestServer_GetLinkStats(t *testing.T) {
