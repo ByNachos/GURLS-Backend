@@ -61,6 +61,21 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          CONFIG_PATH: ci
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: gurls
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
     steps:
       - name: Setup tar options
         run: echo "TAR_OPTIONS=--skip-old-files" >> $GITHUB_ENV
@@ -81,6 +96,12 @@ jobs:
           restore-keys: ${{ runner.os }}-go-
 
       - name: Run tests with detailed output
+        env:
+          DATABASE_PASSWORD: testpass
+          DATABASE_HOST: localhost
+          DATABASE_PORT: 5432
+          DATABASE_USER: testuser
+          DATABASE_NAME: testdb
         run: |
           go test -v -race -coverprofile=coverage.out -json ./... > test-report.json
           go test -v -race -coverprofile=coverage.out ./... 2>&1 | tee test-report.txt
