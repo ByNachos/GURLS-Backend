@@ -1,28 +1,48 @@
+// Package main provides the entry point for the GURLS URL Shortener service.
+//
+//	@title			GURLS URL Shortener API
+//	@version		1.0.0
+//	@description	A minimalistic URL shortener service with subscription-based features.
+//	@termsOfService	http://gurls.ru/terms/
+//
+//	@contact.name	GURLS Support
+//	@contact.email	support@gurls.ru
+//
+//	@license.name	MIT
+//	@license.url	https://opensource.org/licenses/MIT
+//
+//	@host		localhost:8080
+//	@BasePath	/
+//
+//	@securityDefinitions.apikey	BearerAuth
+//	@in							header
+//	@name						Authorization
+//	@description				JWT Authorization header. Format: "Bearer {token}"
+//
+//	@externalDocs.description	OpenAPI Specification
+//	@externalDocs.url			https://swagger.io/resources/open-api/
 package main
 
 import (
-	"GURLS-Backend/internal/analytics"
+	"GURLS-Backend/internal/auth"
 	"GURLS-Backend/internal/config"
 	"GURLS-Backend/internal/database"
-	grpcServer "GURLS-Backend/internal/grpc/server"
+	httpHandler "GURLS-Backend/internal/handler/http"
 	"GURLS-Backend/internal/repository/postgres"
 	"GURLS-Backend/internal/service"
 	"GURLS-Backend/pkg/logger"
 	"GURLS-Backend/pkg/useragent"
 	"context"
-	"fmt"
 	lg "log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/improbable-eng/grpc-web/go/grpcweb"
-	"github.com/rs/cors"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
+
+	_ "GURLS-Backend/docs" // Import swagger docs
 )
 
 func main() {
@@ -34,7 +54,7 @@ func main() {
 		}
 	}()
 
-	log.Info("starting GURLS-Backend gRPC server", zap.String("env", cfg.Env))
+	log.Info("starting GURLS unified service (web-only architecture)", zap.String("env", cfg.Env))
 
 	// Initialize database connection
 	db, err := database.NewConnection(&cfg.Database, log)
@@ -76,89 +96,49 @@ func main() {
 	// Initialize storage and service
 	storage := postgres.New(db, log)
 	urlShortenerService := service.NewURLShortener(storage, &cfg.URLShortener)
-
-	// Initialize analytics processor
-	analyticsConfig := analytics.DefaultConfig()
-	analyticsProcessor := analytics.NewProcessor(storage, log, analyticsConfig)
 	
-	// Start analytics processor
-	if err := analyticsProcessor.Start(); err != nil {
-		log.Fatal("failed to start analytics processor", zap.Error(err))
+	// Initialize Payment service
+	paymentService := service.NewPaymentService(storage, &cfg.Payment, log)
+
+	// Initialize JWT service for authentication
+	jwtConfig := &auth.JWTConfig{
+		SecretKey:            []byte("your-secret-key-here"), // TODO: Move to config
+		AccessTokenDuration:  15 * time.Minute,
+		RefreshTokenDuration: 24 * time.Hour * 7, // 7 days
+		Issuer:               "GURLS-Backend",
 	}
-	
-	log.Info("analytics processor started successfully")
+	jwtService := auth.NewJWTService(jwtConfig)
+	passwordService := auth.NewPasswordService()
 
-	// Create and configure gRPC server
-	gRPCServer := grpc.NewServer()
-	grpcServer.Register(gRPCServer, log, urlShortenerService, storage, analyticsProcessor)
-
-	// Start gRPC server (for Bot/Redirect)
-	grpcLis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.GRPCServer.Port))
-	if err != nil {
-		log.Fatal("failed to listen for gRPC", zap.Error(err))
-	}
-
-	log.Info("gRPC server listening", zap.String("address", grpcLis.Addr().String()))
-
-	// Start gRPC server in goroutine
-	go func() {
-		if err := gRPCServer.Serve(grpcLis); err != nil {
-			log.Error("gRPC server failed", zap.Error(err))
-		}
-	}()
-
-	// Create gRPC-Web wrapper for Frontend
-	grpcWebServer := grpcweb.WrapServer(gRPCServer,
-		grpcweb.WithCorsForRegisteredEndpointsOnly(false),
-		grpcweb.WithWebsockets(true),
-		grpcweb.WithWebsocketOriginFunc(func(req *http.Request) bool {
-			// Allow all origins for development - should be restricted in production
-			return true
-		}),
+	// Create unified HTTP server
+	httpAPIServer := httpHandler.NewServer(
+		storage,
+		urlShortenerService,
+		paymentService,
+		jwtService,
+		passwordService,
+		log,
+		cfg.URLShortener.BaseURL,
 	)
 
-	// Setup CORS for browser requests
-	corsHandler := cors.New(cors.Options{
-		AllowedOrigins: []string{
-			"http://localhost:3000",  // React dev server
-			"http://localhost:8080",  // Production build
-			"http://127.0.0.1:3000",
-			"http://127.0.0.1:8080",
-		},
-		AllowedMethods: []string{
-			http.MethodGet,
-			http.MethodPost,
-			http.MethodOptions,
-		},
-		AllowedHeaders: []string{
-			"Accept",
-			"Accept-Language", 
-			"Content-Language",
-			"Content-Type",
-			"X-Grpc-Web",
-			"X-User-Agent",
-		},
-		ExposedHeaders: []string{
-			"Grpc-Status",
-			"Grpc-Message",
-			"Grpc-Status-Details-Bin",
-		},
-		AllowCredentials: false,
-		MaxAge:          86400, // 24 hours
-	})
+	// Setup routes
+	httpMux := httpAPIServer.SetupRoutes()
 
-	// Create HTTP server for gRPC-Web
-	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.GRPCServer.WebPort),
-		Handler: corsHandler.Handler(grpcWebServer),
+	// Create single HTTP server (port 8080) - according to FEATURE.md requirements
+	unifiedHTTPServer := &http.Server{
+		Addr:         ":8080",
+		Handler:      httpMux,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	log.Info("gRPC-Web server listening", zap.Int("port", cfg.GRPCServer.WebPort))
+	log.Info("starting unified HTTP server (web-only architecture)", zap.String("address", ":8080"))
 
-	// Start gRPC-Web server in goroutine
+	// Start unified HTTP server in goroutine
 	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Error("gRPC-Web server failed", zap.Error(err))
+		if err := unifiedHTTPServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("unified HTTP server failed", zap.Error(err))
 		}
 	}()
 
@@ -166,26 +146,16 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Info("shutting down GURLS-Backend...")
+	log.Info("shutting down GURLS unified service...")
 
-	// Gracefully stop gRPC-Web server with timeout
+	// Gracefully stop HTTP server with timeout
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Error("failed to shutdown gRPC-Web server", zap.Error(err))
+	// Shutdown unified HTTP server
+	if err := unifiedHTTPServer.Shutdown(shutdownCtx); err != nil {
+		log.Error("failed to shutdown unified HTTP server", zap.Error(err))
 	} else {
-		log.Info("gRPC-Web server stopped")
-	}
-
-	// Gracefully stop gRPC server
-	gRPCServer.GracefulStop()
-	log.Info("gRPC server stopped")
-
-	// Stop analytics processor
-	if err := analyticsProcessor.Stop(); err != nil {
-		log.Error("failed to stop analytics processor gracefully", zap.Error(err))
-	} else {
-		log.Info("analytics processor stopped")
+		log.Info("unified HTTP server stopped")
 	}
 }

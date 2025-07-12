@@ -6,6 +6,7 @@ grpc_server:
 
 url_shortener:
   alias_length: 4
+  base_url: "http://localhost:8080"
 
 database:
   host: "localhost"
@@ -21,3 +22,9 @@ database:
   # Migration settings for local development
   auto_migrate: true  # Automatically run migrations on startup
   seed_data: true     # Seed initial data (subscription types)
+
+payment:
+  shop_id: "test-shop-id"
+  secret_key: "test-secret-key"
+  api_url: "https://api.yookassa.ru/v3"
+  test_mode: true  # Enable mock payment mode for development

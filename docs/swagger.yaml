@@ -1,0 +1,223 @@
+basePath: /
+definitions:
+  auth.AuthResponse:
+    properties:
+      access_token:
+        type: string
+      refresh_token:
+        type: string
+      user:
+        $ref: '#/definitions/auth.UserInfo'
+    type: object
+  auth.LoginRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  auth.RegisterRequest:
+    properties:
+      email:
+        type: string
+      password:
+        type: string
+    type: object
+  auth.UserInfo:
+    properties:
+      email:
+        type: string
+      email_verified:
+        type: boolean
+      id:
+        type: integer
+    type: object
+  http.CreateLinkRequest:
+    properties:
+      custom_alias:
+        type: string
+      expires_at:
+        type: string
+      original_url:
+        type: string
+      title:
+        type: string
+    type: object
+  http.CreateLinkResponse:
+    properties:
+      alias:
+        type: string
+      short_url:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact:
+    email: support@gurls.ru
+    name: GURLS Support
+  description: A minimalistic URL shortener service with subscription-based features.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://gurls.ru/terms/
+  title: GURLS URL Shortener API
+  version: 1.0.0
+paths:
+  /api/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: Authenticate user and receive JWT tokens
+      parameters:
+      - description: Login request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/auth.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Login successful
+          schema:
+            $ref: '#/definitions/auth.AuthResponse'
+        "400":
+          description: Invalid request data
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Invalid credentials
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Login user
+      tags:
+      - Authentication
+  /api/auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Create a new user account
+      parameters:
+      - description: Registration request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/auth.RegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: User registered successfully
+          schema:
+            $ref: '#/definitions/auth.AuthResponse'
+        "400":
+          description: Invalid request data
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: User already exists
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Register a new user
+      tags:
+      - Authentication
+  /api/links/{alias}:
+    delete:
+      description: Delete a specific link by alias
+      parameters:
+      - description: Link alias
+        in: path
+        name: alias
+        required: true
+        type: string
+      responses:
+        "204":
+          description: Link deleted successfully
+        "401":
+          description: Authentication required
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Access denied
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Link not found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Delete a link
+      tags:
+      - Links
+  /api/shorten:
+    post:
+      consumes:
+      - application/json
+      description: Create a new shortened URL
+      parameters:
+      - description: Link creation request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/http.CreateLinkRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Link created successfully
+          schema:
+            $ref: '#/definitions/http.CreateLinkResponse'
+        "400":
+          description: Invalid request data
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Authentication required
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Subscription limit reached
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Alias already exists
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Create a short link
+      tags:
+      - Links
+securityDefinitions:
+  BearerAuth:
+    description: 'JWT Authorization header. Format: "Bearer {token}"'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

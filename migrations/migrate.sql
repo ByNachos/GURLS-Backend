@@ -9,6 +9,8 @@
 \i 005_create_user_stats.sql
 \i 006_create_sessions.sql
 \i 007_create_refresh_tokens.sql
+\i 008_remove_telegram_integration.sql
+\i 009_create_payments.sql
 
 -- Информация о выполненных миграциях
 SELECT 'Database migration completed successfully!' as status;

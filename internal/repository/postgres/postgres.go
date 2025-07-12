@@ -26,33 +26,20 @@ func New(db *gorm.DB, log *zap.Logger) *PostgresStorage {
 	}
 }
 
-// --- User Methods ---
+// --- User Methods (updated for web-only authentication) ---
 
-// FindOrCreateUser находит пользователя по Telegram ID или создает нового
-func (s *PostgresStorage) FindOrCreateUser(ctx context.Context, tgID int64) (*domain.User, error) {
-	var user domain.User
-
-	// Сначала пытаемся найти существующего пользователя
-	err := s.db.WithContext(ctx).Where("telegram_id = ?", tgID).First(&user).Error
-	if err == nil {
-		return &user, nil
-	}
-
-	if err != gorm.ErrRecordNotFound {
-		s.log.Error("failed to find user by telegram_id", zap.Int64("telegram_id", tgID), zap.Error(err))
-		return nil, fmt.Errorf("failed to find user: %w", err)
-	}
-
-	// Пользователь не найден, создаем нового
-	user = domain.User{
-		TelegramID:         &tgID,
-		RegistrationSource: "telegram",
+// CreateUser создает нового пользователя с email и паролем
+func (s *PostgresStorage) CreateUser(ctx context.Context, email, passwordHash string) (*domain.User, error) {
+	user := domain.User{
+		Email:              email,
+		PasswordHash:       passwordHash,
 		SubscriptionTypeID: 1, // default to 'free' plan
 		IsActive:           true,
+		EmailVerified:      false,
 	}
 
 	if err := s.db.WithContext(ctx).Create(&user).Error; err != nil {
-		s.log.Error("failed to create user", zap.Int64("telegram_id", tgID), zap.Error(err))
+		s.log.Error("failed to create user", zap.String("email", email), zap.Error(err))
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
@@ -61,21 +48,65 @@ func (s *PostgresStorage) FindOrCreateUser(ctx context.Context, tgID int64) (*do
 		s.log.Warn("failed to create user stats", zap.Int64("user_id", user.ID), zap.Error(err))
 	}
 
-	s.log.Info("created new user", zap.Int64("user_id", user.ID), zap.Int64("telegram_id", tgID))
+	s.log.Info("created new user", zap.Int64("user_id", user.ID), zap.String("email", email))
 	return &user, nil
 }
 
-// GetUserByTGID получает пользователя по Telegram ID
-func (s *PostgresStorage) GetUserByTGID(ctx context.Context, tgID int64) (*domain.User, error) {
+// GetUserByEmail получает пользователя по email
+func (s *PostgresStorage) GetUserByEmail(ctx context.Context, email string) (*domain.User, error) {
 	var user domain.User
 
-	err := s.db.WithContext(ctx).Where("telegram_id = ? AND is_active = ?", tgID, true).First(&user).Error
+	err := s.db.WithContext(ctx).Where("email = ? AND is_active = ?", email, true).First(&user).Error
 	if err == gorm.ErrRecordNotFound {
 		return nil, fmt.Errorf("user not found")
 	}
 	if err != nil {
-		s.log.Error("failed to get user by telegram_id", zap.Int64("telegram_id", tgID), zap.Error(err))
+		s.log.Error("failed to get user by email", zap.String("email", email), zap.Error(err))
 		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	return &user, nil
+}
+
+// GetUserByID получает пользователя по ID
+func (s *PostgresStorage) GetUserByID(ctx context.Context, userID int64) (*domain.User, error) {
+	var user domain.User
+
+	err := s.db.WithContext(ctx).Where("id = ? AND is_active = ?", userID, true).First(&user).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, fmt.Errorf("user not found")
+	}
+	if err != nil {
+		s.log.Error("failed to get user by id", zap.Int64("user_id", userID), zap.Error(err))
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+
+	return &user, nil
+}
+
+// UpdateUser обновляет данные пользователя
+func (s *PostgresStorage) UpdateUser(ctx context.Context, user *domain.User) error {
+	err := s.db.WithContext(ctx).Save(user).Error
+	if err != nil {
+		s.log.Error("failed to update user", zap.Int64("user_id", user.ID), zap.Error(err))
+		return fmt.Errorf("failed to update user: %w", err)
+	}
+
+	s.log.Info("updated user", zap.Int64("user_id", user.ID))
+	return nil
+}
+
+// FindUserByEmailAndPassword находит пользователя для аутентификации
+func (s *PostgresStorage) FindUserByEmailAndPassword(ctx context.Context, email string) (*domain.User, error) {
+	var user domain.User
+
+	err := s.db.WithContext(ctx).Where("email = ? AND is_active = ?", email, true).First(&user).Error
+	if err == gorm.ErrRecordNotFound {
+		return nil, fmt.Errorf("user not found")
+	}
+	if err != nil {
+		s.log.Error("failed to find user for authentication", zap.String("email", email), zap.Error(err))
+		return nil, fmt.Errorf("failed to find user: %w", err)
 	}
 
 	return &user, nil
@@ -284,6 +315,86 @@ func (s *PostgresStorage) GetClicksByDevice(ctx context.Context, linkID int64) (
 	return clicksByDevice, nil
 }
 
+// GetLinkAndRecordClick получает ссылку и записывает клик атомарно (для unified service)
+func (s *PostgresStorage) GetLinkAndRecordClick(ctx context.Context, alias string, ipAddress *string, userAgent *string, referer *string) (*domain.Link, error) {
+	// Начинаем транзакцию
+	tx := s.db.WithContext(ctx).Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// Получаем ссылку
+	var link domain.Link
+	err := tx.Where("alias = ? AND is_active = ?", alias, true).First(&link).Error
+	if err == gorm.ErrRecordNotFound {
+		tx.Rollback()
+		return nil, repository.ErrAliasNotFound
+	}
+	if err != nil {
+		tx.Rollback()
+		s.log.Error("failed to get link for redirect", zap.String("alias", alias), zap.Error(err))
+		return nil, fmt.Errorf("failed to get link: %w", err)
+	}
+
+	// Проверяем срок действия ссылки
+	if link.ExpiresAt != nil && time.Now().After(*link.ExpiresAt) {
+		tx.Rollback()
+		return nil, repository.ErrAliasNotFound
+	}
+
+	// Обновляем счетчик кликов
+	err = tx.Model(&link).Update("click_count", gorm.Expr("click_count + 1")).Error
+	if err != nil {
+		tx.Rollback()
+		s.log.Error("failed to update click count", zap.String("alias", alias), zap.Error(err))
+		return nil, fmt.Errorf("failed to update click count: %w", err)
+	}
+
+	// Создаем запись клика
+	clickedAt := time.Now()
+	click := domain.Click{
+		LinkID:     link.ID,
+		ClickedAt:  clickedAt,
+		IsUnique:   true, // Simplified logic for now
+	}
+
+	// Добавляем дополнительную информацию если есть
+	if ipAddress != nil {
+		if ip := net.ParseIP(*ipAddress); ip != nil {
+			click.IPAddress = &ip
+		}
+	}
+	if userAgent != nil {
+		click.UserAgent = userAgent
+	}
+	if referer != nil {
+		click.Referer = referer
+	}
+
+	err = tx.Create(&click).Error
+	if err != nil {
+		tx.Rollback()
+		s.log.Error("failed to record click", zap.String("alias", alias), zap.Error(err))
+		return nil, fmt.Errorf("failed to record click: %w", err)
+	}
+
+	// Обновляем статистику пользователя
+	if err := s.incrementClicksReceived(tx, link.UserID); err != nil {
+		s.log.Warn("failed to update user click stats", zap.Int64("user_id", link.UserID), zap.Error(err))
+	}
+
+	// Коммитим транзакцию
+	if err := tx.Commit().Error; err != nil {
+		s.log.Error("failed to commit transaction", zap.String("alias", alias), zap.Error(err))
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	s.log.Info("processed redirect with analytics", zap.String("alias", alias), zap.Int64("link_id", link.ID))
+	return &link, nil
+}
+
 // --- Helper Methods ---
 
 // createUserStats создает начальную статистику для пользователя
@@ -313,4 +424,121 @@ func (s *PostgresStorage) incrementClicksReceived(tx *gorm.DB, userID int64) err
 	return tx.Model(&domain.UserStats{}).
 		Where("user_id = ?", userID).
 		Update("clicks_received_this_month", gorm.Expr("clicks_received_this_month + 1")).Error
+}
+
+// --- Payment Methods ---
+
+// CreatePayment creates a new payment record
+func (s *PostgresStorage) CreatePayment(ctx context.Context, payment *domain.Payment) error {
+	if err := s.db.WithContext(ctx).Create(payment).Error; err != nil {
+		s.log.Error("failed to create payment", 
+			zap.String("payment_id", payment.PaymentID), 
+			zap.Int64("user_id", payment.UserID), 
+			zap.Error(err))
+		return fmt.Errorf("failed to create payment: %w", err)
+	}
+	return nil
+}
+
+// GetPaymentByID retrieves a payment by its internal payment ID
+func (s *PostgresStorage) GetPaymentByID(ctx context.Context, paymentID string) (*domain.Payment, error) {
+	var payment domain.Payment
+	if err := s.db.WithContext(ctx).Where("payment_id = ?", paymentID).First(&payment).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, repository.ErrPaymentNotFound
+		}
+		s.log.Error("failed to get payment by ID", zap.String("payment_id", paymentID), zap.Error(err))
+		return nil, fmt.Errorf("failed to get payment: %w", err)
+	}
+	return &payment, nil
+}
+
+// GetPaymentByYooKassaID retrieves a payment by YooKassa payment ID
+func (s *PostgresStorage) GetPaymentByYooKassaID(ctx context.Context, yookassaID string) (*domain.Payment, error) {
+	var payment domain.Payment
+	if err := s.db.WithContext(ctx).Where("yookassa_payment_id = ?", yookassaID).First(&payment).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, repository.ErrPaymentNotFound
+		}
+		s.log.Error("failed to get payment by YooKassa ID", zap.String("yookassa_id", yookassaID), zap.Error(err))
+		return nil, fmt.Errorf("failed to get payment: %w", err)
+	}
+	return &payment, nil
+}
+
+// UpdatePayment updates an existing payment record
+func (s *PostgresStorage) UpdatePayment(ctx context.Context, payment *domain.Payment) error {
+	if err := s.db.WithContext(ctx).Save(payment).Error; err != nil {
+		s.log.Error("failed to update payment", 
+			zap.String("payment_id", payment.PaymentID), 
+			zap.Error(err))
+		return fmt.Errorf("failed to update payment: %w", err)
+	}
+	return nil
+}
+
+// ListUserPayments retrieves all payments for a specific user
+func (s *PostgresStorage) ListUserPayments(ctx context.Context, userID int64) ([]*domain.Payment, error) {
+	var payments []*domain.Payment
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Order("created_at DESC").
+		Find(&payments).Error; err != nil {
+		s.log.Error("failed to list user payments", zap.Int64("user_id", userID), zap.Error(err))
+		return nil, fmt.Errorf("failed to list user payments: %w", err)
+	}
+	return payments, nil
+}
+
+// --- Subscription Methods ---
+
+// GetSubscriptionType retrieves a subscription type by ID
+func (s *PostgresStorage) GetSubscriptionType(ctx context.Context, id int16) (*domain.SubscriptionType, error) {
+	var subscriptionType domain.SubscriptionType
+	if err := s.db.WithContext(ctx).Where("id = ? AND is_active = ?", id, true).First(&subscriptionType).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, repository.ErrSubscriptionTypeNotFound
+		}
+		s.log.Error("failed to get subscription type", zap.Int16("id", id), zap.Error(err))
+		return nil, fmt.Errorf("failed to get subscription type: %w", err)
+	}
+	return &subscriptionType, nil
+}
+
+// ListSubscriptionTypes retrieves all active subscription types
+func (s *PostgresStorage) ListSubscriptionTypes(ctx context.Context) ([]*domain.SubscriptionType, error) {
+	var subscriptionTypes []*domain.SubscriptionType
+	if err := s.db.WithContext(ctx).
+		Where("is_active = ?", true).
+		Order("price_monthly ASC").
+		Find(&subscriptionTypes).Error; err != nil {
+		s.log.Error("failed to list subscription types", zap.Error(err))
+		return nil, fmt.Errorf("failed to list subscription types: %w", err)
+	}
+	return subscriptionTypes, nil
+}
+
+// CreateSubscriptionChange creates a new subscription change record
+func (s *PostgresStorage) CreateSubscriptionChange(ctx context.Context, change *domain.SubscriptionChange) error {
+	if err := s.db.WithContext(ctx).Create(change).Error; err != nil {
+		s.log.Error("failed to create subscription change", 
+			zap.Int64("user_id", change.UserID), 
+			zap.Int16("new_subscription", change.NewSubscriptionID), 
+			zap.Error(err))
+		return fmt.Errorf("failed to create subscription change: %w", err)
+	}
+	return nil
+}
+
+// GetActiveSubscriptionChanges retrieves active subscription changes for a user
+func (s *PostgresStorage) GetActiveSubscriptionChanges(ctx context.Context, userID int64) ([]*domain.SubscriptionChange, error) {
+	var changes []*domain.SubscriptionChange
+	if err := s.db.WithContext(ctx).
+		Where("user_id = ? AND is_active = ?", userID, true).
+		Order("created_at DESC").
+		Find(&changes).Error; err != nil {
+		s.log.Error("failed to get active subscription changes", zap.Int64("user_id", userID), zap.Error(err))
+		return nil, fmt.Errorf("failed to get active subscription changes: %w", err)
+	}
+	return changes, nil
 }

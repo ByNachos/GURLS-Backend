@@ -14,6 +14,7 @@ type Config struct {
 	GRPCServer   `yaml:"grpc_server"`
 	URLShortener `yaml:"url_shortener"`
 	Database     `yaml:"database"`
+	Payment      `yaml:"payment"`
 }
 
 // GRPCServer holds gRPC server specific configuration.
@@ -24,7 +25,8 @@ type GRPCServer struct {
 
 // URLShortener holds service-specific configuration.
 type URLShortener struct {
-	AliasLength int `yaml:"alias_length" env:"ALIAS_LENGTH" env-default:"4"`
+	AliasLength int    `yaml:"alias_length" env:"ALIAS_LENGTH" env-default:"4"`
+	BaseURL     string `yaml:"base_url" env:"BASE_URL" env-default:"http://localhost:8080"`
 }
 
 // Database holds database specific configuration.
@@ -42,6 +44,14 @@ type Database struct {
 	// Migration settings
 	AutoMigrate bool `yaml:"auto_migrate" env:"DATABASE_AUTO_MIGRATE" env-default:"true"`
 	SeedData    bool `yaml:"seed_data" env:"DATABASE_SEED_DATA" env-default:"true"`
+}
+
+// Payment holds payment service specific configuration.
+type Payment struct {
+	ShopID    string `yaml:"shop_id" env:"YOOKASSA_SHOP_ID" env-default:"test"`
+	SecretKey string `yaml:"secret_key" env:"YOOKASSA_SECRET_KEY" env-default:"test"`
+	APIURL    string `yaml:"api_url" env:"YOOKASSA_API_URL" env-default:"https://api.yookassa.ru/v3"`
+	TestMode  bool   `yaml:"test_mode" env:"YOOKASSA_TEST_MODE" env-default:"true"`
 }
 
 // MustLoad loads the application configuration.
