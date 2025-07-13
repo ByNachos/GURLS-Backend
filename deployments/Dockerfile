@@ -23,7 +23,8 @@ WORKDIR /app
 
 # Копируем бинарник
 COPY --from=builder /app/service .
-COPY --from=builder /app/api/ ./api/
+COPY --from=builder /app/assets ./assets
+#COPY --from=builder /app/api/ ./api/
 
 # Копируем конфигурацию (опционально, только если нужно)
 COPY --from=builder /app/config/ ./config/
